@@ -1,0 +1,5 @@
+run#    type   y [mm]  ystop   y' [mm]   y'stop [mm]
+run001  int    0.26            -0.125
+run002  int    0.26            -0.125
+run003  yscan  0.      0.3     -0.125    
+run004  ypscan 0.25            -0.18      -0.09

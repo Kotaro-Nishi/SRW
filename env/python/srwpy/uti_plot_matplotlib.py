@@ -34,16 +34,19 @@ class Backend(object):
         import matplotlib
         if self._running_in_ipython():
             backend = self._init_ipython(backend)
-            import matplotlib.pyplot
+            import matplotlib.pyplot as plt
             self._pl = matplotlib.pyplot
         else:
             if backend == uti_plot.DEFAULT_BACKEND:
                 (backend, fname_format) = self._default_backend(fname_format)
             matplotlib.use(backend)
-            import matplotlib.pyplot
+            import matplotlib.pyplot as plt
             self._pl = matplotlib.pyplot
             matplotlib.pyplot.ioff()
             (backend, fname_format) = self._verify_pyplot(backend, fname_format)
+        plt.rcParams['lines.linewidth'] = 1
+        plt.rcParams['lines.linestyle'] = '-'
+        plt.rcParams['lines.marker'] = 'None'
         if fname_format is not None:
             print('Saving figures to ' + fname_format)
         self._backend = backend
