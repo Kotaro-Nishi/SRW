@@ -21,6 +21,9 @@ docs/build/
 *.so
 *.pyd
 
+# data file
+.txt
+
 .vscode/
 __srwl_logs__/
 uti_plot*.png
