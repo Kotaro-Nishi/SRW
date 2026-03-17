@@ -1,216 +1,321 @@
 import numpy as np
-import matplotlib.pyplot as plt
-plt.rcParams.update({'font.size': 12})
 import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+plt.rcParams.update({'font.size': 10})
 from scipy.optimize import leastsq
-from copy import deepcopy
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from tqdm import tqdm
-import scipy.signal as signal
+import os
+import re
 
-try: #OC15112022
-    import sys
-    sys.path.append('../')
-    from srwlib import *
-    from uti_plot import *
-except:
-    from srwpy.srwlib import *
-    from srwpy.uti_plot import *
+# =====================================================================
+# Configuration
+# =====================================================================
+DATA_DIR  = "/home/nishi/SRW/env/python/srwpy/examples/data_URI/"
+SAVE_DIR  = "/home/nishi/SRW/env/python/srwpy/examples/Oscillation/yy_yp_ana/"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-# ----- Constants and Configurations -----
-DATA_DIR = "/home/nishi/SRW/env/python/srwpy/examples/data_URI/"
-LGAP_ARRAY = np.arange(0.860, 1.685, 0.001) # m
-SCREEN_Y_CONFIG = [0e-3, +2.0e-3, 51] # m
-SCREEN_Y_ARRAY = np.linspace(SCREEN_Y_CONFIG[0], SCREEN_Y_CONFIG[1], SCREEN_Y_CONFIG[2])
+LGAP_ARRAY     = np.arange(0.860, 1.685, 0.001)   # m, 825 points
+SCREEN_Y_MINS  = np.arange(-20., 19., 2.) * 1e-3  # m, -20 to 18 mm (20 windows)
+SCREEN_Y_PTS   = 51                                # points per window
 
-SCREEN_Y_CONFIG_LIST  = [ [-20.e-3+i*2.e-3, -18.e-3+i*2.e-3, 51] for i in range(20)]
-SCREEN_Y_ARRAY_LIST   = [ np.linspace(config[0], config[1], config[2]) for config in SCREEN_Y_CONFIG_LIST ]
+# Sine function: A*(1 + sin(2*pi*d/T + phi))
+def sin_fnc(prm, d):
+    return prm[0] * (1.0 + np.sin(d * 2.0 * np.pi / prm[1] + prm[2]))
 
-BEAM_Y_LOOP  = np.arange(0.e-3, 21.e-3, 1.e-3)
-BEAM_YP_LOOP = np.arange(-2.e-3, 2.e-3, 0.1e-3)
+def fit_fnc(prm, d, osc):
+    return sin_fnc(prm, d) - osc
 
-#test benchmark
-#SCREEN_Y_CONFIG_LIST  = [ [-20.e-3+i*2.e-3, -18.e-3+i*2.e-3, 51] for i in range(5)]
-#BEAM_Y_LOOP  = np.arange(0.e-3, 5.e-3, 1.e-3)
-#BEAM_YP_LOOP = np.arange(0.e-3, 0.5e-3, 0.1e-3)
-# ------------------------*-------------------------
+# =====================================================================
+# File discovery
+# =====================================================================
+def parse_filename(fname):
+    """Return (beam_y_mm, beam_yp_mrad, screen_ymin_mm) from filename."""
+    m = re.match(
+        r"BeamY_([-\d.]+)mm_BeamYP_([-\d.]+)mrad_ScreenYmin_([-\d.]+)mm\.txt",
+        os.path.basename(fname)
+    )
+    if m is None:
+        return None
+    return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
-class MagFieldManager:
-    def __init__(self, mag_field_dir):
-        self.mag_field_dir = mag_field_dir
-        self.mag_fld_cache = {}
-        try:
-            self.get_mag_field(LGAP_ARRAY[0]) # preload to cache
-        except:
-            self.get_mag_field(0.860) # preload to cache
+def get_all_conditions(data_dir):
+    """Return sorted unique (beam_y_mm, beam_yp_mrad) pairs."""
+    conditions = set()
+    for fname in os.listdir(data_dir):
+        result = parse_filename(fname)
+        if result is None:
+            continue
+        by, byp, _ = result
+        conditions.add((by, byp))
+    return sorted(conditions)
 
-    def _get_cache_key(self, Lgap):
-        if isinstance(Lgap, (float,int)):
-            return f"Lgap_{Lgap:.3f}"
-        else:
-            return Lgap
+# =====================================================================
+# Data loading
+# =====================================================================
+def load_condition(data_dir, beam_y_mm, beam_yp_mrad):
+    """
+    Load and stitch all ScreenYmin files for a given (beam_y, beam_yp) condition.
+    Returns:
+        intensity : ndarray, shape (n_lgap, n_y)
+        screen_y  : ndarray, shape (n_y,)  [m]
+    """
+    intensity_windows = []
+    screen_y_windows  = []
 
-    def get_mag_field(self, Lgap):
-        key = self._get_cache_key(Lgap)
-        if key not in self.mag_fld_cache:
-            self.mag_fld_cache[key] = self._configure_double_undulator_fld(Lgap)
-        return self.mag_fld_cache[key]
-    
-    def _configure_double_undulator_fld(self, Lgap=0.860):
-        B_z = np.loadtxt(self.mag_field_dir +"Bz_profile.txt", dtype='float')
-        B_y = np.loadtxt(self.mag_field_dir+"By_profile.txt", dtype='float')
-        z   = np.loadtxt(self.mag_field_dir+"z_positions.txt", dtype='float')
-        y   = np.loadtxt(self.mag_field_dir+"y_positions.txt", dtype='float')
-
-        n_y, n_z = B_y.shape
-        n_x = 1
-        Bx_arr = array('d', [0.]*(n_x*n_y*n_z))
-        By_arr = array('d', [0.]*(n_x*n_y*n_z))
-        Bz_arr = array('d', [0.]*(n_x*n_y*n_z))
-        for iz in range(n_z):
-            for iy in range(n_y):
-                for ix in range(n_x):
-                    idx = ix + iy*n_x + iz*n_x*n_y
-                    By_arr[idx] = B_y[iy][iz]*1e-3  #Convert from mT to T
-                    Bz_arr[idx] = B_z[iy][iz]*1e-3  #Convert from mT to T 
-        magFld = SRWLMagFld3D( Bx_arr, By_arr, Bz_arr, n_x, n_y, n_z, 1e-3, y[-1] - y[0], z[-1] - z[0], 1 )
-
-        self.xcID = 0. #Transverse Coordinates of ID Center [m]
-        self.ycID = 0.
-        self.zcID = 0. #Longitudinal Coordinate of ID Center [m]
-        fieldInterpMeth = 4 #2 #Magnetic Field Interpolation Method, to be entered into 3D field structures below (to be used e.g. for trajectory calculation):
-        #1- bi-linear (3D), 2- bi-quadratic (3D), 3- bi-cubic (3D), 4- 1D cubic spline (longitudinal) + 2D bi-cu
-        L_und = 0.520
-        magFldCnt = SRWLMagFldC(
-            _arMagFld = [magFld, magFld],
-            _arXc = array('d', [self.xcID, self.xcID]),
-            _arYc = array('d', [self.ycID, self.ycID]),
-            _arZc = array('d', [self.zcID, self.zcID + L_und + Lgap]),
+    for ymin in SCREEN_Y_MINS:
+        fname = (
+            f"BeamY_{beam_y_mm:.3f}mm_BeamYP_{beam_yp_mrad:.3f}mrad"
+            f"_ScreenYmin_{ymin*1e3:.3f}mm.txt"
         )
-        return magFldCnt
+        fpath = os.path.join(data_dir, fname)
+        if not os.path.exists(fpath):
+            continue
+        data = np.loadtxt(fpath)   # shape (n_lgap, n_y_pts)
+        y_arr = np.linspace(ymin, ymin + 2.e-3, SCREEN_Y_PTS)
+        intensity_windows.append(data)
+        screen_y_windows.append(y_arr)
 
-class SRWSimulationEngine:
-    def __init__(self, mag_manager):
-        self.mag_manager = mag_manager
-        self.zcID = mag_manager.zcID
-        self.screen_z = 14. #m
-        self.npTraj = 50001 #Number of Points for Trajectory calculation
+    if len(intensity_windows) == 0:
+        return None, None
 
-        self.beam_energy = 0.195 # GeV
-        self.lambda_L_obs = 404. # nm
+    # Stitch: use all points from first window, then skip first point of each
+    # subsequent window (they overlap at boundary).
+    intensity_stitched = intensity_windows[0]
+    screen_y_stitched  = screen_y_windows[0]
+    for i in range(1, len(intensity_windows)):
+        intensity_stitched = np.concatenate(
+            [intensity_stitched, intensity_windows[i][:, 1:]], axis=1
+        )
+        screen_y_stitched = np.concatenate(
+            [screen_y_stitched, screen_y_windows[i][1:]]
+        )
 
-        self.base_beam = self._initialize_beam()
-        self.base_wfr = self._initialize_wavefront()
+    return intensity_stitched, screen_y_stitched   # (n_lgap, n_y), (n_y,)
 
-    def run_wfr_simulation_driving(self, beam_y, beam_yp, screen_y):
-        filename = self.generate_filename(beam_y, beam_yp, screen_y[0])
-        if os.path.exists(filename):
-            print(f"File {filename} already exists. Skipping simulation.")
-            return np.loadtxt(filename)
+# =====================================================================
+# Sine fitting
+# =====================================================================
+def fit_sine_vs_lgap(intensity, lgap_mm, init_val=None):
+    """
+    For each screen y position, fit a sine to intensity vs Lgap.
+    intensity : (n_lgap, n_y)
+    lgap_mm   : (n_lgap,) [mm]
+    Returns prm_arr : (n_y, 3)  columns = [amplitude, period_mm, phase]
+            err_arr : (n_y, 3)
+    """
+    if init_val is None:
+        # Rough initial guess from the data
+        amp0    = np.nanmean(intensity)
+        period0 = 115.0   # mm, typical undulator gap oscillation
+        phase0  = 2.5
+        init_val = [amp0, period0, phase0]
+
+    n_y = intensity.shape[1]
+    prm_arr = np.zeros((n_y, 3))
+    err_arr = np.zeros((n_y, 3))
+
+    for iy in range(n_y):
+        data_y = intensity[:, iy]
         try:
-            arI_lst = []
-            for Lgap in LGAP_ARRAY:
-                arI = self.run_wfr_simulation_single_shot(float(beam_y), float(beam_yp), float(Lgap), screen_y)
-                arI_lst.append(arI)
-            arI_lst = np.array(arI_lst)
-            self.save_raw_intensity(arI_lst, filename)
-        except Exception as e:
-            print(f"Error occurred while running simulation: {e}")
-            raise
-        
+            result = leastsq(
+                fit_fnc, init_val,
+                args=(lgap_mm, data_y),
+                full_output=True
+            )
+            prm, cov, *_ = result
+            prm_arr[iy] = prm
+            if cov is not None:
+                err_arr[iy] = np.sqrt(np.abs(np.diag(cov)))
+            else:
+                err_arr[iy] = np.nan
+        except Exception:
+            prm_arr[iy] = np.nan
+            err_arr[iy] = np.nan
 
-    def run_wfr_simulation_single_shot(self, beam_y, beam_yp, Lgap, screen_y):
-        _mag_fld_cnt = self.mag_manager.get_mag_field(Lgap)
+    return prm_arr, err_arr   # amplitude, period[mm], phase
 
-        _beam = deepcopy(self.base_beam)
-        _beam.partStatMom1.y = beam_y
-        _beam.partStatMom1.yp = beam_yp
+# =====================================================================
+# Plotting helpers
+# =====================================================================
+def plot_period_phase(screen_y_m, prm_arr, err_arr, beam_y_mm, beam_yp_mrad, save_dir):
+    """Plot period and phase vs screen y for one (beam_y, beam_yp) condition."""
+    y_mm   = screen_y_m * 1e3
+    period = prm_arr[:, 1]
+    phase  = prm_arr[:, 2]
+    e_per  = err_arr[:, 1]
+    e_phi  = err_arr[:, 2]
 
-        _wfr = deepcopy(self.base_wfr)
-        _wfr.partBeam = _beam
-        _wfr.mesh.yStart = screen_y[0] 
-        _wfr.mesh.yFin   = screen_y[1]
-        _wfr.mesh.ny     = screen_y[2]
+    fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    fig.suptitle(
+        f"BeamY={beam_y_mm:.1f} mm, BeamYP={beam_yp_mrad:.1f} mrad", fontsize=12
+    )
 
-        arI = self.calculate_intensity(_mag_fld_cnt, _beam, _wfr)
-        return arI # extract center x point
-    
-    def _initialize_beam(self):
-        temp_mag = self.mag_manager.get_mag_field(list(self.mag_manager.mag_fld_cache.keys())[0])
-        _elecBeam = SRWLPartBeam()
-        _elecBeam.Iavg = 1e-9 #Average Current [A]
-        _elecBeam.partStatMom1.x = 0.
-        _elecBeam.partStatMom1.y = 0.
-        _elecBeam.partStatMom1.z = self.zcID - 0.5*temp_mag.arMagFld[0].rz - 0.1   #Initial Longitudinal Coordinate (set before the ID)
-        _elecBeam.partStatMom1.xp = 0.
-        _elecBeam.partStatMom1.yp = 0.
-        _elecBeam.partStatMom1.gamma = self.beam_energy/0.51099890221e-03 #Relative
-        return _elecBeam
-    
-    def _initialize_wavefront(self):
-        _wfr = SRWLWfr()
-        _wfr.allocate(_ne=1, _nx=1, _ny=51) #Numbers of points vs Photon Energy
-        _wfr.mesh.zStart = self.zcID + self.screen_z #Longitudinal Position [m] where Electric Field will be calculated
-        _wfr.mesh.eStart = 1239.841984/self.lambda_L_obs #Initial Photon Energy [eV]
-        _wfr.mesh.eFin   = 1239.841984/self.lambda_L_obs #Final Photon Energy [eV]
-        _wfr.mesh.xStart = 0. #Initial Horizontal Position [m]
-        _wfr.mesh.xFin   = 0. #Final Horizontal Position [m]
-        _wfr.mesh.nx     = 1. #Number of points vs Horizontal Position
-        _wfr.mesh.yStart = 0. #Initial Vertical Position [m]
-        _wfr.mesh.yFin   = 1.e-3 #Final Vertical Position [m]
-        _wfr.mesh.ny     = 51 #Number of points vs Vertical Position
-        _wfr.partBeam = self.base_beam
-        return _wfr
-    
-    def calculate_intensity(self, _mag_fld_cnt, _beam, _wfr):
-        _arPrecPar = [1, 0.01, _beam.partStatMom1.z, _mag_fld_cnt.arZc[1] + 0.5*_mag_fld_cnt.arMagFld[1].rz + 0.1, self.npTraj, 1, 0]
-        srwl.CalcElecFieldSR(_wfr, 0, _mag_fld_cnt, _arPrecPar)
-        arI = array('f', [0]*_wfr.mesh.nx * _wfr.mesh.ny * _wfr.mesh.ne)
-        srwl.CalcIntFromElecField(arI, _wfr, 6, 0, 3, _wfr.mesh.eStart, 0., 0.)
-        return arI
-    
-    def generate_filename(self, beam_y, beam_yp, screen_y_min):
-        file_dir = "/home/nishi/SRW/env/python/srwpy/examples/data_URI/"
-        return file_dir + f"BeamY_{beam_y*1e3:.3f}mm_BeamYP_{beam_yp*1e3:.3f}mrad_ScreenYmin_{screen_y_min*1e3:.3f}mm.txt"
-    
-    def save_raw_intensity(self, intensity_array, filename):
-        np.savetxt(filename, intensity_array)
-        return 0
-    
+    axes[0].errorbar(y_mm, period, yerr=e_per, fmt='-o', markersize=2, linewidth=0.8)
+    axes[0].set_ylabel("Fitted Period [mm]")
+    axes[0].set_title("Oscillation Period vs Screen Y")
 
-def init_worker():
-    global worker_engine
-    mag_mgr = MagFieldManager(MAG_DIR)
-    worker_engine = SRWSimulationEngine(mag_mgr)
+    axes[1].errorbar(y_mm, phase,  yerr=e_phi, fmt='-o', markersize=2, linewidth=0.8, color='tab:orange')
+    axes[1].set_ylabel("Fitted Phase [rad]")
+    axes[1].set_xlabel("Screen Y [mm]")
+    axes[1].set_title("Oscillation Phase vs Screen Y")
 
-def get_all_tasks():
-    return list((beam_y, beam_yp, screen_y_config) for beam_y in BEAM_Y_LOOP for beam_yp in BEAM_YP_LOOP for screen_y_config in SCREEN_Y_CONFIG_LIST)
+    plt.tight_layout()
+    fname = (
+        f"PeriodPhase_BeamY{beam_y_mm:.1f}_BeamYP{beam_yp_mrad:.1f}.png"
+        .replace("-", "m")
+    )
+    fig.savefig(os.path.join(save_dir, fname), dpi=150)
+    plt.close(fig)
 
-def worker(task):
-    beam_y, beam_yp, screen_y_config = task
-    arI = worker_engine.run_wfr_simulation_driving(float(beam_y), float(beam_yp), screen_y_config)
-    return arI
+# =====================================================================
+# Main analysis loop
+# =====================================================================
+def run_analysis():
+    lgap_mm = LGAP_ARRAY * 1e3   # convert to mm for fitting
 
+    conditions = get_all_conditions(DATA_DIR)
+    print(f"Found {len(conditions)} (beam_y, beam_yp) conditions.")
+
+    # Results: for each condition store (beam_y, beam_yp, y_maxperiod, y_minphase)
+    summary = []
+
+    for beam_y_mm, beam_yp_mrad in conditions:
+        print(f"  Processing BeamY={beam_y_mm:.1f} mm, BeamYP={beam_yp_mrad:.1f} mrad ...",
+              end=" ", flush=True)
+
+        intensity, screen_y = load_condition(DATA_DIR, beam_y_mm, beam_yp_mrad)
+        if intensity is None:
+            print("  [SKIP: no data]")
+            continue
+
+        prm_arr, err_arr = fit_sine_vs_lgap(intensity, lgap_mm)
+
+        # Extract extreme positions
+        period = prm_arr[:, 1]
+        phase  = prm_arr[:, 2]
+
+        idx_max_period = np.nanargmax(period)
+        idx_min_phase  = np.nanargmin(phase)
+        y_max_period   = screen_y[idx_max_period] * 1e3   # mm
+        y_min_phase    = screen_y[idx_min_phase]  * 1e3   # mm
+
+        print(
+            f"max_period at y={y_max_period:.2f} mm, "
+            f"min_phase  at y={y_min_phase:.2f} mm"
+        )
+
+        # Per-condition plot
+        plot_period_phase(screen_y, prm_arr, err_arr, beam_y_mm, beam_yp_mrad, SAVE_DIR)
+
+        summary.append([beam_y_mm, beam_yp_mrad, y_max_period, y_min_phase,
+                        period[idx_max_period], phase[idx_min_phase]])
+
+    summary = np.array(summary)
+    # columns: beam_y, beam_yp, y_max_period_mm, y_min_phase_mm, period_max, phase_min
+    np.savetxt(
+        os.path.join(SAVE_DIR, "summary.txt"),
+        summary,
+        header="beam_y_mm  beam_yp_mrad  y_maxPeriod_mm  y_minPhase_mm  period_max_mm  phase_min_rad",
+        fmt="%.4f"
+    )
+    print(f"\nSummary saved to {SAVE_DIR}summary.txt")
+    return summary
+
+# =====================================================================
+# Summary plots
+# =====================================================================
+def plot_summary(summary):
+    """
+    For each unique beam_y, plot y_maxperiod and y_minphase vs beam_yp.
+    For each unique beam_yp, plot vs beam_y.
+    """
+    beam_y_vals  = np.unique(summary[:, 0])
+    beam_yp_vals = np.unique(summary[:, 1])
+
+    # --- Fixed beam_y: scan over beam_yp ---
+    for by in beam_y_vals:
+        mask = summary[:, 0] == by
+        sub  = summary[mask]
+        sub  = sub[np.argsort(sub[:, 1])]   # sort by beam_yp
+
+        fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+        fig.suptitle(f"BeamY = {by:.1f} mm", fontsize=12)
+
+        axes[0].plot(sub[:, 1], sub[:, 2], '-o', markersize=4)
+        axes[0].set_ylabel("y at max Period [mm]")
+        axes[0].set_title("Screen Y of max Oscillation Period")
+
+        axes[1].plot(sub[:, 1], sub[:, 3], '-o', markersize=4, color='tab:orange')
+        axes[1].set_ylabel("y at min Phase [mm]")
+        axes[1].set_xlabel("BeamYP [mrad]")
+        axes[1].set_title("Screen Y of min Oscillation Phase")
+
+        plt.tight_layout()
+        fname = f"Summary_vs_BeamYP_BeamY{by:.1f}.png".replace("-", "m")
+        fig.savefig(os.path.join(SAVE_DIR, fname), dpi=150)
+        plt.close(fig)
+
+    # --- Fixed beam_yp: scan over beam_y ---
+    for byp in beam_yp_vals:
+        mask = summary[:, 1] == byp
+        sub  = summary[mask]
+        sub  = sub[np.argsort(sub[:, 0])]   # sort by beam_y
+
+        fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+        fig.suptitle(f"BeamYP = {byp:.1f} mrad", fontsize=12)
+
+        axes[0].plot(sub[:, 0], sub[:, 2], '-o', markersize=4)
+        axes[0].set_ylabel("y at max Period [mm]")
+        axes[0].set_title("Screen Y of max Oscillation Period")
+
+        axes[1].plot(sub[:, 0], sub[:, 3], '-o', markersize=4, color='tab:orange')
+        axes[1].set_ylabel("y at min Phase [mm]")
+        axes[1].set_xlabel("BeamY [mm]")
+        axes[1].set_title("Screen Y of min Oscillation Phase")
+
+        plt.tight_layout()
+        fname = f"Summary_vs_BeamY_BeamYP{byp:.1f}.png".replace("-", "m").replace(".", "p")
+        fig.savefig(os.path.join(SAVE_DIR, fname), dpi=150)
+        plt.close(fig)
+
+    # --- 2D colormaps: y_maxperiod and y_minphase on (beam_y, beam_yp) grid ---
+    grid_ymp = np.full((len(beam_y_vals), len(beam_yp_vals)), np.nan)
+    grid_phi = np.full((len(beam_y_vals), len(beam_yp_vals)), np.nan)
+
+    for row in summary:
+        iy  = np.where(beam_y_vals  == row[0])[0][0]
+        iyp = np.where(beam_yp_vals == row[1])[0][0]
+        grid_ymp[iy, iyp] = row[2]
+        grid_phi[iy, iyp] = row[3]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    im0 = axes[0].imshow(
+        grid_ymp, aspect='auto', origin='lower',
+        extent=[beam_yp_vals[0], beam_yp_vals[-1], beam_y_vals[0], beam_y_vals[-1]]
+    )
+    axes[0].set_xlabel("BeamYP [mrad]")
+    axes[0].set_ylabel("BeamY [mm]")
+    axes[0].set_title("Screen Y at max Period [mm]")
+    plt.colorbar(im0, ax=axes[0], label="y [mm]")
+
+    im1 = axes[1].imshow(
+        grid_phi, aspect='auto', origin='lower',
+        extent=[beam_yp_vals[0], beam_yp_vals[-1], beam_y_vals[0], beam_y_vals[-1]]
+    )
+    axes[1].set_xlabel("BeamYP [mrad]")
+    axes[1].set_ylabel("BeamY [mm]")
+    axes[1].set_title("Screen Y at min Phase [mm]")
+    plt.colorbar(im1, ax=axes[1], label="y [mm]")
+
+    plt.tight_layout()
+    fig.savefig(os.path.join(SAVE_DIR, "Summary_2D_colormap.png"), dpi=150)
+    plt.close(fig)
+    print("Summary plots saved.")
+
+# =====================================================================
+# Entry point
+# =====================================================================
 if __name__ == "__main__":
-    tasks = get_all_tasks()
-    with ProcessPoolExecutor(max_workers=20, initializer=init_worker) as executor:
-        futures = {executor.submit(worker, task): task for task in tasks}
-
-        for future in tqdm(as_completed(futures), total=len(tasks)):
-            results = future.result()
-
-exit()
-
-mag_mgr = MagFieldManager(MAG_DIR)
-engine = SRWSimulationEngine(mag_mgr)
-
-plt.figure(figsize=(10, 5))
-arI_lst = []
-
-for beam_y in BEAM_Y_LOOP:
-    for beam_yp in BEAM_YP_LOOP:
-        for screen_y_config in SCREEN_Y_CONFIG_LIST:
-            #print(beam_y, beam_yp, screen_y_config)
-            arI = engine.run_wfr_simulation_driving(beam_y, beam_yp, screen_y_config)
-
-exit()
+    summary = run_analysis()
+    if len(summary) > 0:
+        plot_summary(summary)
