@@ -10,6 +10,8 @@ srwpy.egg-info/
 docs/source/cookbook
 docs/build/
 
+MAMI/
+
 # Python and C compiled files
 *.pyc
 *.o
@@ -24,6 +26,7 @@ docs/build/
 # data files
 *.txt
 *.dat
+*.png
 
 .vscode/
 __srwl_logs__/
