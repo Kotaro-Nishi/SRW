@@ -21,8 +21,9 @@ docs/build/
 *.so
 *.pyd
 
-# data file
-.txt
+# data files
+*.txt
+*.dat
 
 .vscode/
 __srwl_logs__/
