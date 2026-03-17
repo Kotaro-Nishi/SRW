@@ -18,7 +18,7 @@ except:
     from srwpy.uti_plot import *
 
 # ----- Constants and Configurations -----
-MAG_DIR = "/home/nishi/Mainz/mainz/BeamEnergyCalib/2024Calib/MagField/"
+DATA_DIR = "/home/nishi/SRW/env/python/srwpy/examples/data_URI/"
 LGAP_ARRAY = np.arange(0.860, 1.685, 0.001) # m
 SCREEN_Y_CONFIG = [0e-3, +2.0e-3, 51] # m
 SCREEN_Y_ARRAY = np.linspace(SCREEN_Y_CONFIG[0], SCREEN_Y_CONFIG[1], SCREEN_Y_CONFIG[2])
