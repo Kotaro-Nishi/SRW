@@ -4,7 +4,7 @@ plt.rcParams.update({'font.size': 12})
 import matplotlib
 from scipy.optimize import leastsq
 from copy import deepcopy
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import scipy.signal as signal
 
@@ -30,9 +30,9 @@ BEAM_Y_LOOP  = np.arange(0.e-3, 21.e-3, 1.e-3)
 BEAM_YP_LOOP = np.arange(-2.e-3, 2.e-3, 0.1e-3)
 
 #test benchmark
-SCREEN_Y_CONFIG_LIST  = [ [-20.e-3+i*2.e-3, -18.e-3+i*2.e-3, 51] for i in range(5)]
-BEAM_Y_LOOP  = np.arange(0.e-3, 5.e-3, 1.e-3)
-BEAM_YP_LOOP = np.arange(0.e-3, 0.5e-3, 0.1e-3)
+#SCREEN_Y_CONFIG_LIST  = [ [-20.e-3+i*2.e-3, -18.e-3+i*2.e-3, 51] for i in range(5)]
+#BEAM_Y_LOOP  = np.arange(0.e-3, 5.e-3, 1.e-3)
+#BEAM_YP_LOOP = np.arange(0.e-3, 0.5e-3, 0.1e-3)
 # ------------------------*-------------------------
 
 class MagFieldManager:
@@ -103,13 +103,21 @@ class SRWSimulationEngine:
         self.base_wfr = self._initialize_wavefront()
 
     def run_wfr_simulation_driving(self, beam_y, beam_yp, screen_y):
-        arI_lst = []
-        for Lgap in tqdm(LGAP_ARRAY):
-            arI = self.run_wfr_simulation_single_shot(beam_y, beam_yp, Lgap, screen_y)
-            arI_lst.append(arI)
-        arI_lst = np.array(arI_lst)
         filename = self.generate_filename(beam_y, beam_yp, screen_y[0])
-        self.save_raw_intensity(arI_lst, filename)
+        if os.path.exists(filename):
+            print(f"File {filename} already exists. Skipping simulation.")
+            return np.loadtxt(filename)
+        try:
+            arI_lst = []
+            for Lgap in LGAP_ARRAY:
+                arI = self.run_wfr_simulation_single_shot(float(beam_y), float(beam_yp), float(Lgap), screen_y)
+                arI_lst.append(arI)
+            arI_lst = np.array(arI_lst)
+            self.save_raw_intensity(arI_lst, filename)
+        except Exception as e:
+            print(f"Error occurred while running simulation: {e}")
+            raise
+        
 
     def run_wfr_simulation_single_shot(self, beam_y, beam_yp, Lgap, screen_y):
         _mag_fld_cnt = self.mag_manager.get_mag_field(Lgap)
@@ -156,7 +164,6 @@ class SRWSimulationEngine:
     
     def calculate_intensity(self, _mag_fld_cnt, _beam, _wfr):
         _arPrecPar = [1, 0.01, _beam.partStatMom1.z, _mag_fld_cnt.arZc[1] + 0.5*_mag_fld_cnt.arMagFld[1].rz + 0.1, self.npTraj, 1, 0]
-
         srwl.CalcElecFieldSR(_wfr, 0, _mag_fld_cnt, _arPrecPar)
         arI = array('f', [0]*_wfr.mesh.nx * _wfr.mesh.ny * _wfr.mesh.ne)
         srwl.CalcIntFromElecField(arI, _wfr, 6, 0, 3, _wfr.mesh.eStart, 0., 0.)
@@ -171,7 +178,7 @@ class SRWSimulationEngine:
         return 0
     
 
-def init_worer():
+def init_worker():
     global worker_engine
     mag_mgr = MagFieldManager(MAG_DIR)
     worker_engine = SRWSimulationEngine(mag_mgr)
@@ -181,13 +188,16 @@ def get_all_tasks():
 
 def worker(task):
     beam_y, beam_yp, screen_y_config = task
-    arI = worker_engine.run_wfr_simulation_driving(beam_y, beam_yp, screen_y_config)
+    arI = worker_engine.run_wfr_simulation_driving(float(beam_y), float(beam_yp), screen_y_config)
     return arI
 
 if __name__ == "__main__":
     tasks = get_all_tasks()
-    with ProcessPoolExecutor(max_workers=20, initializer=init_worer) as executor:
-        results = list(tqdm(executor.map(worker, tasks), total=len(tasks)))
+    with ProcessPoolExecutor(max_workers=20, initializer=init_worker) as executor:
+        futures = {executor.submit(worker, task): task for task in tasks}
+
+        for future in tqdm(as_completed(futures), total=len(tasks)):
+            results = future.result()
 
 exit()
 
