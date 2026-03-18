@@ -17,8 +17,8 @@ except:
 file_id = "0011"
 Lgap_config = [0.7325, 1.5575, 0.001] #m
 Lgap_config = [0.860, 1.685, 0.001] #m
-Screen_x_config = [-3.e-3, 3.e-3, 3] #m
-Screen_y_config = [-2.2e-3, -1.3e-3, 31] #m
+Screen_x_config = [0, 1.e-3, 1] #m
+Screen_y_config = [-2.2e-3, -1.3e-3, 51] #m
 beam_x, beam_y, beam_xp, beam_yp = 0., 0.26e-3, 0., -0.125e-3
 lambda_L_obs = 404. #nm
 screen_z = 14. #m
@@ -104,15 +104,19 @@ for Lgap in Lgap_arange:
     magFldCnt.arZc[1] = zcID + L_und + Lgap
 
     wfr = SRWLWfr()
-    wfr.allocate(_ne=1, _nx=11, _ny=11) #Numbers of points vs Photon Energy
+    wfr.allocate(_ne=1, _nx=1, _ny=31) #Numbers of points vs Photon Energy
     wfr.mesh.zStart = magFldCnt.arMagFld[0].rz + magFldCnt.arMagFld[1].rz + Lgap + screen_z #Longitudinal Position [m] where Electric Field will be calculated
-
+    wfr.mesh.zStart = magFldCnt.arZc[0] + screen_z #Longitudinal Position [m] where Electric Field will be calculated
+    print(wfr.mesh.zStart)
     wfr.mesh.eStart = 1239.841984/lambda_L_obs #Initial Photon Energy [eV]
     wfr.mesh.eFin   = 1239.841984/lambda_L_obs #Final Photon Energy [eV]
 
-    wfr.mesh.xStart = Screen_x_config[0] #Initial Horizontal Position [m]
-    wfr.mesh.xFin   = Screen_x_config[1] #Final Horizontal Position [m]
-    wfr.mesh.nx     = Screen_x_config[2] #Number of points vs Horizontal Position
+    #wfr.mesh.xStart = Screen_x_config[0] #Initial Horizontal Position [m]
+    #wfr.mesh.xFin   = Screen_x_config[1] #Final Horizontal Position [m]
+    #wfr.mesh.nx     = Screen_x_config[2] #Number of points vs Horizontal Position
+    wfr.mesh.xStart = 0.
+    wfr.mesh.xFin   = 0.
+    wfr.mesh.nx     = 1
 
     wfr.mesh.yStart = Screen_y_config[0] #Initial Vertical Position [m]
     wfr.mesh.yFin   = Screen_y_config[1] #Final Vertical Position [m]
@@ -128,13 +132,17 @@ for Lgap in Lgap_arange:
     arI = array('f', [0]*wfr.mesh.nx * wfr.mesh.ny * wfr.mesh.ne)
     srwl.CalcIntFromElecField(arI, wfr, 6, 0, 3, wfr.mesh.eStart, 0., 0.)
 
-    arI = np.array(arI).reshape(wfr.mesh.ny, wfr.mesh.nx)
-    #print(arI.shape) #OK:31,3, NG:8,8 
-    arI = arI.T  # to make y first index
+    arI = np.array(arI)#.reshape(wfr.mesh.ny, wfr.mesh.nx)
+    #arI = arI.T  # to make y first index
     Intensity_list.append(arI)
 
 ar_Intensity = np.array(Intensity_list) #825, 3, 31
-ar_Intensity = ar_Intensity[:,len(screen_x_range)//2, :]
+print(ar_Intensity.shape) #OK:825, 3, 31, NG:8, 8, 8
+#ar_Intensity = ar_Intensity[:,len(screen_x_range)//2, :]
+#print(ar_Intensity.shape) #OK:825, 31, NG:8, 8
+plt.plot(ar_Intensity[:,15])
+plt.show()
+exit()
 
 #***********************Plotting Results:
 position = Lgap_arange * 1e3  # in mm
